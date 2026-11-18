@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CFB2 网盘</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/drive.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="网盘导航">
+      <a class="brand" href="/" aria-label="CFB2 网盘首页"><span class="mark" aria-hidden="true"></span>CFB2 <b>网盘</b></a>
+      <nav class="navigation" aria-label="主导航">
+        <a href="/" id="nav-files" class="nav-link" aria-current="page"><span class="icon folder" aria-hidden="true"></span>我的文件</a>
+        <a href="/?view=shares" id="nav-shares" class="nav-link"><span class="icon link" aria-hidden="true"></span>我的分享</a>
+      </nav>
+      <section class="storage" aria-labelledby="storage-title">
+        <h2 id="storage-title">网盘容量</h2>
+        <div id="storage-capacity" class="capacity" aria-live="polite">加载中…</div>
+      </section>
+      <p id="demo" class="demo-note" hidden>本地演示 · 文件存放在此设备</p>
+    </aside>
+    <main class="main">
+      <div class="topline">
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="当前目录"></nav>
+        <span class="private-label"><span aria-hidden="true"></span>私有网盘</span>
+      </div>
+      <div class="workspace" id="workspace">
+        <header class="section-head">
+          <div><h1 id="page-title">我的文件</h1><p id="summary" class="muted" aria-live="polite"></p></div>
+          <div id="file-actions" class="actions">
+            <button id="new-folder" class="button secondary"><span aria-hidden="true">＋</span> 新建文件夹</button>
+            <button id="upload" class="button primary"><span aria-hidden="true">↑</span> 上传文件</button>
+            <input id="upload-input" type="file" multiple hidden>
+          </div>
+        </header>
+        <section id="upload-status" class="upload-status" aria-label="上传进度" hidden>
+          <div class="upload-line"><strong id="upload-title"></strong><span id="upload-percent" class="muted"></span></div>
+          <progress id="upload-progress" max="100" value="0"></progress>
+          <p id="upload-message" aria-live="polite"></p>
+        </section>
+        <div id="error" class="notice error" role="alert" hidden></div>
+        <div class="table-card" id="table-card">
+          <table id="listing">
+            <thead><tr><th scope="col">名称</th><th scope="col" id="col-size">大小</th><th scope="col" id="col-date" class="date-column">修改时间</th><th scope="col" class="control-heading">操作</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <div class="empty" id="empty" hidden>
+            <span class="empty-icon"><span class="icon folder" id="empty-icon" aria-hidden="true"></span></span>
+            <strong id="empty-title"></strong>
+            <p id="empty-text"></p>
+            <button id="empty-upload" class="button secondary">选择文件</button>
+          </div>
+          <div class="pager" id="pager" hidden><button id="more" class="button secondary">加载更多</button></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <form id="dialog-form">
+      <div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" type="button" class="icon-button" aria-label="关闭">×</button></div>
+      <div id="dialog-content" class="dialog-content"></div>
+      <p id="dialog-error" class="notice error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" id="dialog-cancel" class="button secondary">取消</button><button id="dialog-submit" class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

@@ -1,0 +1,1 @@
+ALTER TABLE entries ADD COLUMN cleanup_after INTEGER NOT NULL DEFAULT 0;
