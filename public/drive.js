@@ -32,6 +32,7 @@ async function api(path, { method = 'GET', data, raw } = {}) {
     body: data === undefined ? raw : JSON.stringify(data),
   });
   if (!response.ok) {
+    if (response.status === 401) location.replace('/login');
     const failure = await response.json().catch(() => ({}));
     throw Object.assign(new Error(failure.error || `请求失败（${response.status}）`), { status: response.status });
   }
@@ -403,6 +404,14 @@ $('nav-shares').addEventListener('click', openView);
 window.addEventListener('popstate', () => void load());
 $('more').addEventListener('click', () => void load(true));
 $('new-folder').addEventListener('click', newFolder);
+$('logout').addEventListener('click', async () => {
+  $('logout').disabled = true;
+  try {
+    await api('/api/admin/logout', { method: 'POST' });
+    location.replace('/login');
+  } catch (error) { errorAt('error', error); }
+  finally { $('logout').disabled = false; }
+});
 for (const id of ['upload', 'empty-upload']) $(id).addEventListener('click', () => $('upload-input').click());
 $('upload-input').addEventListener('change', () => {
   void uploadFiles(Array.from($('upload-input').files));

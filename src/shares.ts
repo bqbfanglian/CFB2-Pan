@@ -37,7 +37,8 @@ async function passwordHash(password: string, salt: string) {
 }
 
 async function link(env: Env, request: Request, id: string) {
-  const origin = isDemo(env) ? new URL(request.url).origin : `https://${env.SHARE_HOST}`;
+  const shareHost = !isDemo(env) && env.SHARE_HOST?.trim().toLowerCase();
+  const origin = shareHost ? `https://${shareHost}` : new URL(request.url).origin;
   return `${origin}/s/${await signedValue(env, `link:${id}`)}`;
 }
 

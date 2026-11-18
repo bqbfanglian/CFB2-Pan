@@ -49,8 +49,6 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 999px; }
 .breadcrumbs a:hover { color: var(--blue); text-decoration: underline; }
 .breadcrumbs [aria-current=location] { color: var(--ink); font-weight: 650; }
 .crumb-separator { color: #7e8ca2; }
-.private-label { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; color: #38596a; font-size: 12px; }
-.private-label span { width: 7px; height: 7px; border-radius: 50%; background: #29a979; }
 .workspace { padding: 37px clamp(16px, 4vw, 48px) 55px; max-width: 1500px; }
 .section-head { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 15px; margin-bottom: 24px; }
 .section-head h1 { font-size: clamp(25px, 3vw, 34px); line-height: 1.25; letter-spacing: -.035em; overflow-wrap: anywhere; }

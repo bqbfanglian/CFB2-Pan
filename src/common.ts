@@ -3,11 +3,9 @@ export interface Env {
   ASSETS: Fetcher;
   APP_MODE?: string;
   DEMO_STORE?: R2Bucket;
-  ADMIN_HOST: string;
-  SHARE_HOST: string;
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_AUD: string;
-  ADMIN_EMAIL: string;
+  ADMIN_HOST?: string;
+  SHARE_HOST?: string;
+  ADMIN_PASSWORD?: string;
   B2_BUCKETS?: string;
   SHARE_SECRET?: string;
 }

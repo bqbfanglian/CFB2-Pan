@@ -1,15 +1,10 @@
 # CFB2 网盘
 
-用 Cloudflare Workers 搭建个人网盘。文件存放在多个 Backblaze B2 私有桶中，由 Worker 自动选桶。支持文件管理、分片续传，以及可设密码、有效期和手动撤销的分享链接。
+用 Cloudflare Workers 分发文件。访客打开分享链接即可下载，分享可设密码和有效期，也可手动撤销。管理员用网盘密码登录后上传和管理文件。Worker 会在多个 Backblaze B2 私有桶之间自动调度。
 
 ## 网页部署教程
 
-全程用浏览器操作。需要 GitHub 账号、Backblaze B2 账号，以及一个已接入 Cloudflare 的域名。下面以 `example.com` 为例，部署时换成你自己的域名。
-
-| 示例地址 | 用途 |
-| --- | --- |
-| `drive.example.com` | 管理网盘，管理员用邮箱验证码登录 |
-| `share.example.com` | 打开分享链接，访客可直接访问 |
+全程用浏览器操作。准备 Cloudflare、GitHub 和 Backblaze B2 账号。首次部署可以直接使用 Cloudflare 提供的 `workers.dev` 地址。打开根路径进入管理登录，把 `/s/…` 分享链接发给访客即可。 [Cloudflare 的 `workers.dev` 地址](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 
 下面从**新建数据库**开始。升级已有网盘请看文末的[升级说明](#升级已有网盘)。
 
@@ -23,8 +18,9 @@
    | 1 | [0001_drive.sql](migrations/0001_drive.sql) |
    | 2 | [0002_cleanup_retry.sql](migrations/0002_cleanup_retry.sql) |
    | 3 | [0003_bucket_scheduling.sql](migrations/0003_bucket_scheduling.sql) |
+   | 4 | [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql) |
 
-3. 执行下方查询，看到 `root` 和 `我的文件` 就说明网盘根目录已创建。在 **Tables** 页还能看到 `bucket_health` 表。
+3. 执行下方查询，看到 `root` 和 `我的文件` 就说明网盘根目录已创建。在 **Tables** 页确认有 `bucket_health` 和 `admin_sessions` 表。
 
    ```sql
    SELECT id, name FROM entries WHERE id = 'root';
@@ -57,14 +53,7 @@
 
    示例给每个桶设了 10 GiB 应用配额。首装可直接保留示例中的 `id`、`quota`、`priority` 和 `writable`。真实密钥只填进本机临时副本和 Cloudflare Secret，GitHub 上保留原占位值。
 
-### 3. 给管理域名加邮箱登录
-
-1. 在 Cloudflare 控制台打开 **Zero Trust**。首次进入时按页面提示创建团队。进入 **Integrations → Identity providers → Add new identity provider**，选 **One-time PIN**。已有这个登录方式就直接使用。 [启用邮箱验证码](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/#set-up-otp)
-2. 进入 **Access controls → Applications → Create new application → Self-hosted and private → Add public hostname**。应用名填 `CFB2 Pan`，子域名填 `drive`，域名选自己的域名，路径留空。登录方式选 **One-time PIN**。 [创建 Access 应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/#1-add-your-application-to-access)
-3. 在 **Access policies** 添加策略。**Action** 选 **Allow**，**Include** 选 **Emails**，填你用来登录网盘的邮箱。保存应用。这个 Access 应用只配置 `drive` 管理域名。
-4. 回到 **Applications**，编辑刚创建的应用。在 **Additional settings** 复制 **Application Audience (AUD) Tag**。再到 **Zero Trust → Settings** 记下团队域名，例如 `my-team.cloudflareaccess.com`。这两个值和管理员邮箱在第 5 步使用。 [查找 AUD](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/#get-your-aud-tag) · [查找团队域名](https://developers.cloudflare.com/cloudflare-one/faq/getting-started-faq/)
-
-### 4. 在 Workers & Pages 导入 GitHub 仓库
+### 3. 在 Workers & Pages 导入 GitHub 仓库
 
 1. 进入 **Workers & Pages → Create application**，选择 **GitHub** 并授权 Cloudflare 访问你要部署的仓库。选择第 1 步改过 `wrangler.jsonc` 的那个仓库。 [Workers Builds 导入仓库](https://developers.cloudflare.com/workers/ci-cd/builds/#connect-a-new-worker)
 2. 按下表填写部署表单，点 **Save and Deploy**。表中的命令填在网页表单里，由 Cloudflare 运行。
@@ -78,32 +67,29 @@
    | Deploy command | `npm run deploy` |
    | API token | 使用 Cloudflare 提供的构建令牌。若界面显示 **Create new token**，用它创建默认令牌 |
 
-3. 打开这个 Worker 的 **Deployments**，确认已有成功部署。打开 **Bindings**，确认 `DB` 指向 `cfb2-pan`。本项目使用自定义域名，实际访问地址在第 5 步绑定。 [Workers Builds 表单说明](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
+3. 打开这个 Worker 的 **Deployments**，确认已有成功部署。打开 **Bindings**，确认 `DB` 指向 `cfb2-pan`。在 **Settings → Domains & Routes** 复制 `workers.dev` 地址。如果账户尚未设置 `workers.dev` 子域名，按控制台提示先注册。 [Workers Builds 表单说明](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) · [`workers.dev` 设置](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 
-### 5. 在 Worker 填配置并绑定域名
+### 4. 在 Worker 添加三个 Secret
 
 进入 **Workers & Pages → cfb2-pan → Settings → Variables and Secrets → Add**。按表逐项填 **Type**、**Variable name** 和 **Value**，保存并部署设置。
 
 | Variable name | Type | Value |
 | --- | --- | --- |
-| `ADMIN_HOST` | Text | 管理域名，如 `drive.example.com` |
-| `SHARE_HOST` | Text | 分享域名，如 `share.example.com` |
-| `ADMIN_EMAIL` | Text | 第 3 步 Allow 策略里的邮箱 |
-| `ACCESS_TEAM_DOMAIN` | Text | 第 3 步记录的团队域名，只填主机名 |
-| `ACCESS_AUD` | Text | 第 3 步复制的 AUD Tag |
+| `ADMIN_PASSWORD` | Secret | 自设的管理员密码，16 至 128 个字符，建议用密码管理器生成 |
 | `B2_BUCKETS` | Secret | 第 2 步填好的整个 JSON 数组 |
-| `SHARE_SECRET` | Secret | 用密码管理器生成并保存的随机字符串，例如 40 位随机字母和数字 |
+| `SHARE_SECRET` | Secret | 用密码管理器独立生成的随机字符串，至少 32 字节，例如 40 位随机字母和数字 |
 
-前两个域名只填 `drive.example.com` 这样的主机名。`SHARE_SECRET` 至少 32 字节，后续部署继续使用同一个值。 [Worker Secret 设置](https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboard)
+登录时输入 `ADMIN_PASSWORD`。后续部署继续使用原 `SHARE_SECRET`，这样管理页可以再次复制已有分享链接。 [Worker Secret 设置](https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboard)
 
-1. 进入同一个 Worker 的 **Settings → Domains & Routes → Add → Custom Domain**。填实际管理域名，点 **Add Custom Domain**。
-2. 重复一次，添加实际分享域名。两个域名都应出现在同一个 Worker 的 **Domains & Routes** 中。 [绑定 Worker 自定义域名](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/#set-up-a-custom-domain-in-the-dashboard)
+### 5. 验收上传和分享
 
-### 6. 验收上传和分享
-
-1. 在无痕窗口打开管理域名。看到 Access 登录页后填管理员邮箱，输入邮件验证码。进入网盘后，应能看到文件列表和总容量。
+1. 打开第 3 步复制的站点地址，输入 `ADMIN_PASSWORD` 登录。进入网盘后，应能看到文件列表和总容量。
 2. 上传一个小文件，再上传一个大于 16 MiB 的文件，分别下载验证。要检查自动选桶，可在两个等额空桶上先连续上传两个同样大小的文件，再到 Backblaze 的 **Browse Files → cfb2-pan/** 确认每桶各新增一个对象。
-3. 为文件创建带密码的分享。在另一浏览器或独立的无痕会话打开分享链接，应看到分享密码页面。解锁后下载文件，再从管理页撤销链接。用同一链接再次发起下载，应被拒绝。
+3. 为文件创建分享，密码留空。在无痕窗口打开链接，应能直接看到文件并下载。再从管理页撤销链接，用同一链接重新下载应被拒绝。需要给资源加一道密码时，可在创建分享时填写访问密码。
+
+### 可选：使用自定义域名
+
+在 **Settings → Domains & Routes → Add → Custom Domain** 添加自己的主机名。若只用一个域名，直接用该地址登录和创建分享。若分开管理和分享域名，添加两个 Custom Domain，再在 **Variables and Secrets** 添加两项 **Text** 变量。`ADMIN_HOST` 填管理主机名，`SHARE_HOST` 填分享主机名，例如 `drive.example.com` 和 `share.example.com`。只填主机名，地址可继续沿用来保留旧分享。 [绑定 Worker 自定义域名](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/#set-up-a-custom-domain-in-the-dashboard)
 
 ### 卡在哪一步就查哪一项
 
@@ -111,14 +97,15 @@
 | --- | --- |
 | Cloudflare 的导入列表没有仓库 | 查看 GitHub 的 Cloudflare 应用授权，确认允许访问该仓库。 |
 | 构建日志提示 D1 绑定错误，或网盘打不开文件列表 | 检查部署分支的 `wrangler.jsonc` 是否使用了实际 `database_id`，再到该 D1 的 **Tables** 确认迁移已执行。 |
-| 自定义域名打不开 | 在 **Domains & Routes** 确认两个域名已绑到正确的 Worker，再核对 `ADMIN_HOST` 和 `SHARE_HOST` 是否与绑定值一致。 |
-| 管理域名没有登录页，或登录后返回 403 | 检查 Access 应用的主机名和 Allow 邮箱，再核对 Worker 的 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD` 和 `ADMIN_EMAIL`。 |
+| 登录时提示管理员密码未配置 | 在 **Variables and Secrets** 添加或更新 `ADMIN_PASSWORD`，保存并部署设置。 |
+| 绑定的自定义域名打不开 | 在 **Domains & Routes** 确认域名已绑到正确的 Worker。如果设置过 `ADMIN_HOST` 或 `SHARE_HOST`，核对拼写。 |
 | 网盘显示 B2 配置错误，或写入失败 | 检查 `B2_BUCKETS` 是否为完整 JSON，桶名、区域和密钥是否一一对应，密钥是否有 **Read and Write** 权限。 |
-| 分享链接要求 Access 登录 | 检查 Access 应用的主机名范围。管理应用只覆盖 `drive`，分享使用单独的 `share` 主机名。 |
 
 ## 升级已有网盘
 
-通过旧教程启用了 Wrangler 自动迁移的实例，可继续使用原来的部署命令。采用本页 D1 控制台方式安装的实例，在部署新版代码前到 **D1 → Console** 按顺序执行新版新增的迁移文件。数据库已有文件时，保留原数据库、桶 `id` 和 `SHARE_SECRET`。 [D1 迁移记录](https://developers.cloudflare.com/d1/reference/migrations/)
+1. 在旧 Worker 上先设置 `ADMIN_PASSWORD`。继续使用原 D1、桶 `id`、`SHARE_SECRET` 和分享域名。
+2. 如果之前通过 D1 控制台初始化，在 **D1 → Console** 执行新增的 [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql)。使用 Wrangler 自动迁移的实例沿用原部署命令即可。 [D1 迁移记录](https://developers.cloudflare.com/d1/reference/migrations/)
+3. 新版部署成功后，在 Zero Trust 中取消该网盘域名的旧 Access 应用，再用管理员密码登录确认。保留原分享域名即可继续使用先前发出的分享链接。
 
 ## 日常使用
 
@@ -133,4 +120,4 @@ npm ci
 npm run dev
 ```
 
-打开 [本地网盘](http://127.0.0.1:8787/)。本地演示使用 Wrangler 模拟的 D1 和两个对象桶，数据位于 `.wrangler/state`。运行 `npm run check` 检查代码，运行 `npm run build` 验证部署构建。Windows PowerShell 可使用 `npm.cmd`。
+打开 [本地网盘](http://127.0.0.1:8787/)，使用演示密码 `cfb2-demo-password` 登录。本地演示使用 Wrangler 模拟的 D1 和两个对象桶，数据位于 `.wrangler/state`。运行 `npm run check` 检查代码，运行 `npm run build` 验证部署构建。Windows PowerShell 可使用 `npm.cmd`。

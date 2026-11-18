@@ -3,7 +3,7 @@
   "name": "cfb2-pan",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "keep_vars": true,
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },

@@ -1,34 +1,11 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { Env, file, HttpError, idOf, isDemo, json } from './common';
+import { cleanAdminAuth, isAdmin, login, logout } from './auth';
+import { Env, file, HttpError, idOf, isDemo, json, now } from './common';
 import { createFolder, deleteEntry, download, editEntry, listEntries } from './entries';
 import { createShare, listShares, publicShare, revokeShare } from './shares';
 import { beginUpload, cleanup, uploadRoute } from './uploads';
 import { summary } from './scheduler';
 
 const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-const jwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
-
-async function requireAdmin(env: Env, request: Request) {
-  const token = request.headers.get('Cf-Access-Jwt-Assertion');
-  if (!token) throw new HttpError(401, '请先登录 Cloudflare Access');
-  const domain = env.ACCESS_TEAM_DOMAIN;
-  if (!domain || !/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(domain) || !env.ACCESS_AUD || !env.ADMIN_EMAIL) {
-    throw new HttpError(503, '管理员登录尚未配置');
-  }
-  const issuer = `https://${domain}`;
-  let keys = jwks.get(issuer);
-  if (!keys) {
-    keys = createRemoteJWKSet(new URL('/cdn-cgi/access/certs', issuer));
-    jwks.set(issuer, keys);
-  }
-  try {
-    const { payload } = await jwtVerify(token, keys, {
-      issuer, audience: env.ACCESS_AUD, algorithms: ['RS256'], requiredClaims: ['exp', 'email'],
-    });
-    if (typeof payload.email === 'string' && payload.email.toLowerCase() === env.ADMIN_EMAIL.toLowerCase()) return;
-  } catch { /* Access JWTs that fail verification have no admin permissions. */ }
-  throw new HttpError(403, '当前账户没有网盘管理权限');
-}
 
 function lockHeaders(response: Response) {
   const headers = new Headers(response.headers);
@@ -51,10 +28,13 @@ async function handle(env: Env, request: Request) {
   const read = method === 'GET' || method === 'HEAD';
   const local = isDemo(env) && localHosts.has(hostname);
   if (isDemo(env) && !local) throw new HttpError(404, '页面不存在');
-  const isAdminHost = local || hostname === env.ADMIN_HOST;
-  const isShareHost = local || (hostname === env.SHARE_HOST && hostname !== env.ADMIN_HOST);
+  const adminHost = env.ADMIN_HOST?.trim().toLowerCase();
+  const shareHost = env.SHARE_HOST?.trim().toLowerCase();
+  const isAdminHost = local || !adminHost || hostname === adminHost;
+  const isShareHost = local || (shareHost ? hostname === shareHost : isAdminHost);
   const origin = request.headers.get('origin');
   if (!read && origin && origin !== url.origin) throw new HttpError(403, '跨站请求被拒绝');
+  if (read && pathname === '/style.css' && (isAdminHost || isShareHost)) return asset(env, request, pathname);
 
   if (isShareHost) {
     const share = /^\/s\/([a-zA-Z0-9_-]{43})(?:\/(info|unlock|download))?$/.exec(pathname);
@@ -62,14 +42,23 @@ async function handle(env: Env, request: Request) {
       if (read && !share[2]) return asset(env, request, '/share.html');
       return publicShare(env, request, share[1], share[2]);
     }
-    if (read && ['/style.css', '/share.js'].includes(pathname)) return asset(env, request, pathname);
+    if (read && pathname === '/share.js') return asset(env, request, pathname);
   }
 
   if (!isAdminHost) throw new HttpError(404, '页面不存在');
-  if (!local) await requireAdmin(env, request);
-  if (read && ['/', '/drive.js', '/style.css'].includes(pathname)) {
-    return asset(env, request, pathname === '/' ? '/index.html' : pathname);
+  if (read && pathname === '/login.js') return asset(env, request, pathname);
+  if (read && pathname === '/login') {
+    if (await isAdmin(env, request)) return new Response(null, { status: 303, headers: { Location: '/' } });
+    return asset(env, request, '/login.html');
   }
+  if (method === 'POST' && pathname === '/api/admin/login') return login(env, request);
+  if (method === 'POST' && pathname === '/api/admin/logout') return logout(env, request);
+  if (!await isAdmin(env, request)) {
+    if (read && pathname === '/') return new Response(null, { status: 303, headers: { Location: '/login' } });
+    throw new HttpError(401, '请先登录网盘管理');
+  }
+  if (read && pathname === '/') return asset(env, request, '/index.html');
+  if (read && pathname === '/drive.js') return asset(env, request, pathname);
   if (method === 'GET' && pathname === '/api/storage') return json({ demo: local, ...await summary(env) });
   if (method === 'GET' && pathname === '/api/entries') return listEntries(env, url);
   if (method === 'POST' && pathname === '/api/folders') return createFolder(env, request);
@@ -107,6 +96,6 @@ export default {
     }
   },
   async scheduled(_controller: ScheduledController, env: Env) {
-    await cleanup(env);
+    await Promise.all([cleanup(env), cleanAdminAuth(env.DB, now())]);
   },
 } satisfies ExportedHandler<Env>;
