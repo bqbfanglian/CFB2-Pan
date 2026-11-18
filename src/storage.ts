@@ -1,6 +1,7 @@
 import { AwsClient } from 'aws4fetch';
 import { XMLParser } from 'fast-xml-parser';
 import { Env, HttpError, isDemo, MiB, Prefix } from './common';
+import { decryptCredentials } from './bucket-secrets';
 
 export interface Bucket {
   id: string;
@@ -33,7 +34,7 @@ interface Store {
 const xml = new XMLParser({ parseTagValue: false, processEntities: false });
 const asArray = <T,>(value: T | T[] | undefined): T[] => value === undefined ? [] : Array.isArray(value) ? value : [value];
 
-export function buckets(env: Env): Bucket[] {
+export function configuredBuckets(env: Env): Bucket[] {
   if (isDemo(env)) {
     return [
       { id: 'demo-a', quota: 1024 * MiB, priority: 1 },
@@ -41,9 +42,9 @@ export function buckets(env: Env): Bucket[] {
     ].map(bucket => ({ ...bucket, writable: true, name: bucket.id, region: '', keyId: '', applicationKey: '' }));
   }
   let list: Bucket[];
-  try { list = JSON.parse(env.B2_BUCKETS ?? 'null'); }
+  try { list = JSON.parse(env.B2_BUCKETS || '[]'); }
   catch { throw new HttpError(503, 'B2 存储配置格式无效'); }
-  if (!Array.isArray(list) || list.length < 1 || list.some(bucket => !bucket ||
+  if (!Array.isArray(list) || list.some(bucket => !bucket ||
     typeof bucket.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(bucket.id) ||
     typeof bucket.name !== 'string' || !/^[a-zA-Z0-9-]{6,50}$/.test(bucket.name) ||
     typeof bucket.region !== 'string' || !/^[a-z0-9-]+-\d+$/.test(bucket.region) ||
@@ -219,9 +220,17 @@ class DemoStore implements Store {
   }
 }
 
-export function store(env: Env, id: string): Store {
-  const bucket = buckets(env).find(item => item.id === id);
-  if (!bucket) throw new HttpError(503, '文件所在的存储桶未配置');
-  if (isDemo(env)) return new DemoStore(env.DB, env.DEMO_STORE!, id);
+export function bucketStore(env: Env, bucket: Bucket): Store {
+  if (isDemo(env)) return new DemoStore(env.DB, env.DEMO_STORE!, bucket.id);
   return new B2Store(bucket);
+}
+
+export async function store(env: Env, id: string): Promise<Store> {
+  const configured = configuredBuckets(env).find(item => item.id === id);
+  if (configured) return bucketStore(env, configured);
+  const bucket = await env.DB.prepare(`SELECT bucket_id AS id, name, region, quota, priority, credentials FROM bucket_settings
+    WHERE bucket_id = ? AND removed = 0 AND credentials IS NOT NULL`)
+    .bind(id).first<Omit<Bucket, 'keyId' | 'applicationKey' | 'writable'> & { credentials: string }>();
+  if (!bucket) throw new HttpError(503, '文件所在的存储桶未配置');
+  return bucketStore(env, { ...bucket, ...await decryptCredentials(env, id, bucket.credentials), writable: true });
 }

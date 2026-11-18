@@ -91,7 +91,7 @@ export async function download(env: Env, request: Request, entry: Pick<Entry, 'n
   if (range) headers.set('Content-Range', `bytes ${range.start}-${range.end}/${entry.bytes}`);
   const status = range ? 206 : 200;
   if (request.method === 'HEAD') return new Response(null, { status, headers });
-  const response = await store(env, entry.bucket_id!).get(entry.object_key!, entry.version_id!, range ?? undefined);
+  const response = await (await store(env, entry.bucket_id!)).get(entry.object_key!, entry.version_id!, range ?? undefined);
   if (response.status !== status) {
     await response.body?.cancel();
     throw new HttpError(response.status === 404 ? 404 : 502, '存储对象暂时无法下载');

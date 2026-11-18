@@ -1,4 +1,5 @@
 import { cleanAdminAuth, isAdmin, login, logout } from './auth';
+import { addBucket, overview, removeBucket, setBucketState } from './admin';
 import { Env, file, HttpError, idOf, isDemo, json, now } from './common';
 import { createFolder, deleteEntry, download, editEntry, listEntries } from './entries';
 import { createShare, listShares, publicShare, revokeShare } from './shares';
@@ -21,6 +22,10 @@ function asset(env: Env, request: Request, path: string) {
   return env.ASSETS.fetch(new Request(new URL(path, request.url), request));
 }
 
+function redirect(location: string) {
+  return new Response(null, { status: 303, headers: { Location: location } });
+}
+
 async function handle(env: Env, request: Request) {
   const url = new URL(request.url);
   const { hostname, pathname } = url;
@@ -36,6 +41,19 @@ async function handle(env: Env, request: Request) {
   if (!read && origin && origin !== url.origin) throw new HttpError(403, '跨站请求被拒绝');
   if (read && pathname === '/style.css' && (isAdminHost || isShareHost)) return asset(env, request, pathname);
 
+  if (read && pathname === '/') {
+    if (isAdminHost && (url.searchParams.has('folder') || url.searchParams.get('view') === 'shares')) {
+      const params = new URLSearchParams(url.searchParams);
+      if (!params.has('view')) params.set('view', 'files');
+      return redirect(`/admin?${params}`);
+    }
+    if (isShareHost) {
+      const landing = await asset(env, request, '/index.html');
+      return isAdminHost ? landing : new HTMLRewriter().on('#admin-entry', { element(element) { element.remove(); } }).transform(landing);
+    }
+    if (isAdminHost) return redirect('/admin');
+  }
+
   if (isShareHost) {
     const share = /^\/s\/([a-zA-Z0-9_-]{43})(?:\/(info|unlock|download))?$/.exec(pathname);
     if (share) {
@@ -46,19 +64,25 @@ async function handle(env: Env, request: Request) {
   }
 
   if (!isAdminHost) throw new HttpError(404, '页面不存在');
+  if (read && pathname === '/admin/') return redirect(`/admin${url.search}`);
   if (read && pathname === '/login.js') return asset(env, request, pathname);
   if (read && pathname === '/login') {
-    if (await isAdmin(env, request)) return new Response(null, { status: 303, headers: { Location: '/' } });
+    if (await isAdmin(env, request)) return redirect('/admin');
     return asset(env, request, '/login.html');
   }
   if (method === 'POST' && pathname === '/api/admin/login') return login(env, request);
   if (method === 'POST' && pathname === '/api/admin/logout') return logout(env, request);
   if (!await isAdmin(env, request)) {
-    if (read && pathname === '/') return new Response(null, { status: 303, headers: { Location: '/login' } });
+    if (read && pathname === '/admin') return redirect(`/login?next=${encodeURIComponent(`/admin${url.search}`)}`);
     throw new HttpError(401, '请先登录网盘管理');
   }
-  if (read && pathname === '/') return asset(env, request, '/index.html');
+  if (read && pathname === '/admin') return asset(env, request, '/admin.html');
   if (read && pathname === '/drive.js') return asset(env, request, pathname);
+  if (method === 'GET' && pathname === '/api/admin/overview') return overview(env);
+  if (method === 'POST' && pathname === '/api/admin/buckets') return addBucket(env, request);
+  const bucket = /^\/api\/admin\/buckets\/([a-z0-9-]{1,40})$/.exec(pathname);
+  if (bucket && method === 'PATCH') return setBucketState(env, request, bucket[1]);
+  if (bucket && method === 'DELETE') return removeBucket(env, bucket[1]);
   if (method === 'GET' && pathname === '/api/storage') return json({ demo: local, ...await summary(env) });
   if (method === 'GET' && pathname === '/api/entries') return listEntries(env, url);
   if (method === 'POST' && pathname === '/api/folders') return createFolder(env, request);

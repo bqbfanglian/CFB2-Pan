@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 const date = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
-const state = { view: 'files', parent: 'root', next: null, shown: 0, generation: 0, uploading: false };
+const state = { view: 'overview', parent: 'root', next: null, shown: 0, generation: 0, uploading: false };
 let dialogAction;
 let toastTimer;
 
@@ -32,7 +32,7 @@ async function api(path, { method = 'GET', data, raw } = {}) {
     body: data === undefined ? raw : JSON.stringify(data),
   });
   if (!response.ok) {
-    if (response.status === 401) location.replace('/login');
+    if (response.status === 401) location.replace(`/login?next=${encodeURIComponent(location.pathname + location.search)}`);
     const failure = await response.json().catch(() => ({}));
     throw Object.assign(new Error(failure.error || `请求失败（${response.status}）`), { status: response.status });
   }
@@ -51,7 +51,7 @@ function errorAt(id, error) {
   $(id).hidden = !error;
 }
 
-function driveHref(id) { return id === 'root' ? '/' : `/?folder=${id}`; }
+function driveHref(id) { return id === 'root' ? '/admin?view=files' : `/admin?view=files&folder=${id}`; }
 
 function openView(event) {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -72,10 +72,10 @@ async function loadCapacity() {
     const { demo, used, quota } = await api('/api/storage');
     $('demo').hidden = !demo;
     const bar = element('progress');
-    bar.max = quota;
+    bar.max = quota || 1;
     bar.value = Math.min(used, quota);
     bar.setAttribute('aria-label', '网盘容量配额');
-    $('storage-capacity').replaceChildren(element('span', '', `${fileSize(used)} / ${fileSize(quota)}`), bar);
+    $('storage-capacity').replaceChildren(element('span', '', quota ? `${fileSize(used)} / ${fileSize(quota)}` : '待接入存储桶'), bar);
   } catch (error) { $('storage-capacity').textContent = error.message; }
 }
 
@@ -154,32 +154,130 @@ function shareRow(item) {
   return row;
 }
 
+function metric(label, value) {
+  const card = element('div', 'metric');
+  card.append(element('span', 'metric-label', label), element('strong', 'metric-value', value));
+  return card;
+}
+
+function bucketCard(bucket) {
+  const card = element('article', 'managed-bucket');
+  const title = element('div', 'bucket-title');
+  title.append(element('h2', '', bucket.name), element('span', '', bucket.region || '本地存储'));
+  const status = !bucket.writable ? '只读' : bucket.paused ? '已暂停' : bucket.retryAt ? '暂不可用' : '可写入';
+  const header = element('div', 'bucket-header');
+  header.append(title, element('span', `bucket-status${status === '可写入' ? ' ready' : ''}`, status));
+  const bar = element('progress');
+  bar.max = bucket.quota;
+  bar.value = Math.min(bucket.used, bucket.quota);
+  bar.setAttribute('aria-label', `${bucket.name} 容量`);
+  const details = element('div', 'bucket-details');
+  details.append(element('span', '', `${fileSize(bucket.used)} / ${fileSize(bucket.quota)}`),
+    element('span', '', `对象 ${bucket.files} · 上传记录 ${bucket.uploads}`));
+  const actions = element('div', 'bucket-actions');
+  if (bucket.writable) {
+    actions.append(button(bucket.paused ? '恢复分配' : '暂停分配', 'button secondary', () => {
+      dialog(bucket.paused ? '恢复新上传分配' : '暂停新上传分配', [element('p', '', bucket.paused
+        ? `恢复后，${bucket.name} 会重新参与后台选桶。`
+        : `暂停后，新上传会使用其他可用桶。${bucket.name} 上的下载和已开始上传的续传可继续。`)],
+      bucket.paused ? '恢复' : '暂停', async () => {
+        await api(`/api/admin/buckets/${bucket.id}`, { method: 'PATCH', data: { paused: !bucket.paused } });
+        await refreshStorage(bucket.paused ? '已恢复分配' : '已暂停分配');
+      });
+    }));
+  }
+  const remove = button('移除桶', 'button secondary remove-bucket', () => {
+    dialog('移除存储桶', [element('p', '', `将「${bucket.name}」从网盘移除？Backblaze 上的桶会保留。`)], '移除', async () => {
+      await api(`/api/admin/buckets/${bucket.id}`, { method: 'DELETE' });
+      await refreshStorage('存储桶已移除');
+    }, true);
+  });
+  remove.disabled = bucket.files > 0 || bucket.uploads > 0;
+  actions.append(remove);
+  card.append(header, details, bar, actions);
+  if (remove.disabled) card.append(element('p', 'bucket-note', '文件和待清理上传处理完后可移除。'));
+  if (bucket.retryAt && status === '暂不可用') card.append(element('p', 'bucket-note', `${date.format(bucket.retryAt * 1000)} 后可重新参与分配。`));
+  return card;
+}
+
+function pendingRow(upload, names) {
+  const row = element('article', 'pending-row');
+  const info = element('div');
+  info.append(element('strong', '', upload.name), element('small', 'muted', `${names.get(upload.bucket_id) ?? '存储桶未接入'} · ${fileSize(upload.bytes)} · ${date.format(upload.expires_at * 1000)} 到期`));
+  row.append(info, button('取消上传', 'button secondary', () => {
+    dialog('取消上传', [element('p', '', `取消「${upload.name}」的上传会话？已有分片会在定时清理时释放。`)], '取消上传', async () => {
+      await api(`/api/uploads/${upload.id}`, { method: 'DELETE' });
+      await refreshStorage('已取消上传');
+    }, true);
+  }));
+  return row;
+}
+
+async function refreshStorage(message) {
+  await load();
+  void loadCapacity();
+  notify(message);
+}
+
+async function loadAdminPanel(view, generation) {
+  const isStorage = view === 'storage';
+  const title = isStorage ? '存储桶' : '发布概览';
+  breadcrumbs([{ name: title }]);
+  $('page-title').textContent = title;
+  $('summary').textContent = '加载中…';
+  for (const id of ['dashboard-stats', 'bucket-list', 'pending-list']) $(id).replaceChildren();
+  try {
+    const stats = await api('/api/admin/overview');
+    if (generation !== state.generation) return;
+    if (!isStorage) {
+      $('summary').textContent = stats.buckets.length ? `已接入 ${stats.buckets.length} 个存储桶` : '在「存储」中接入存储桶后即可上传';
+      $('dashboard-stats').replaceChildren(metric('资源文件', stats.files), metric('有效分享', stats.shares),
+        metric('未完成上传', stats.uploads), metric('已用容量', fileSize(stats.used)));
+      return;
+    }
+    const names = new Map(stats.buckets.map(bucket => [bucket.id, bucket.name]));
+    $('summary').textContent = `${stats.buckets.length} 个桶 · ${fileSize(stats.used)} / ${fileSize(stats.quota)}${stats.cleanup ? ` · ${stats.cleanup} 项待清理` : ''}`;
+    $('bucket-list').replaceChildren(...(stats.buckets.length ? stats.buckets.map(bucketCard) : [element('p', 'panel-empty', '添加一个 Backblaze B2 私有桶即可开始上传。')]));
+    $('pending-list').replaceChildren(...(stats.pending.length ? stats.pending.map(upload => pendingRow(upload, names)) : [element('p', 'panel-empty', '没有未完成的上传。')]));
+    if (stats.uploads > stats.pending.length) $('pending-list').append(element('p', 'panel-empty', `显示最近 ${stats.pending.length} 条，共 ${stats.uploads} 条。`));
+  } catch (error) {
+    if (generation === state.generation) { $('summary').textContent = ''; errorAt('error', error); }
+  }
+}
+
 async function load(append = false) {
   const generation = ++state.generation;
   const params = new URLSearchParams(location.search);
-  state.view = params.get('view') === 'shares' ? 'shares' : 'files';
+  const requested = params.get('view');
+  state.view = ['files', 'shares', 'storage'].includes(requested) ? requested : 'overview';
   state.parent = params.get('folder') ?? 'root';
   const shares = state.view === 'shares';
+  const files = state.view === 'files';
+  const storage = state.view === 'storage';
   const offset = append ? state.next : 0;
-  $('nav-files').setAttribute('aria-current', shares ? 'false' : 'page');
-  $('nav-shares').setAttribute('aria-current', shares ? 'page' : 'false');
-  $('file-actions').hidden = shares;
+  $('admin-navigation').querySelectorAll('[data-view]').forEach(node => node.setAttribute('aria-current', node.dataset.view === state.view ? 'page' : 'false'));
+  $('file-actions').hidden = !files;
+  $('add-bucket').hidden = !storage;
+  $('dashboard-panel').hidden = state.view !== 'overview';
+  $('storage-panel').hidden = !storage;
+  $('table-card').hidden = !files && !shares;
+  errorAt('error', null);
+  if (!files && !shares) return loadAdminPanel(state.view, generation);
   $('col-size').textContent = shares ? '状态' : '大小';
   $('col-date').textContent = shares ? '到期时间' : '修改时间';
   $('more').disabled = true;
-  errorAt('error', null);
   if (!append) {
     state.shown = 0;
     $('rows').replaceChildren();
     $('empty').hidden = true;
     $('pager').hidden = true;
-    $('page-title').textContent = shares ? '我的分享' : '我的文件';
+    $('page-title').textContent = shares ? '分享管理' : '资源管理';
     $('summary').textContent = '加载中…';
   }
   try {
     const data = await api(shares ? `/api/shares?offset=${offset}` : `/api/entries?parent=${encodeURIComponent(state.parent)}&offset=${offset}`);
     if (generation !== state.generation) return;
-    const path = shares ? [{ name: '我的分享' }] : data.path;
+    const path = shares ? [{ name: '分享管理' }] : data.path.map(crumb => crumb.id === 'root' ? { ...crumb, name: '资源管理' } : crumb);
     breadcrumbs(path);
     $('page-title').textContent = path.at(-1).name;
     $('rows').append(...data.items.map(shares ? shareRow : fileRow));
@@ -204,6 +302,27 @@ function field(label, options) {
   const input = Object.assign(element('input'), options);
   wrapper.append(input);
   return { wrapper, input };
+}
+
+function addBucketDialog() {
+  const name = field('桶名称', { required: true, minLength: 6, maxLength: 50, placeholder: 'Backblaze 中的 Bucket Name' });
+  const region = field('S3 区域', { required: true, maxLength: 32, placeholder: '例如 us-west-004' });
+  const keyId = field('Key ID', { required: true, maxLength: 256, autocomplete: 'off' });
+  const key = field('Application Key', { type: 'password', required: true, maxLength: 256, autocomplete: 'new-password' });
+  const quota = field('应用配额（GiB）', { type: 'number', value: '10', min: '1', max: '1048576', required: true });
+  const priority = field('优先级（同占用率时使用）', { type: 'number', value: '1', min: '0', max: '999', required: true });
+  const limits = element('div', 'paired-fields');
+  limits.append(quota.wrapper, priority.wrapper);
+  dialog('接入 B2 私有桶', [name.wrapper, region.wrapper, keyId.wrapper, key.wrapper, limits], '验证并添加', async () => {
+    $('dialog-submit').textContent = '正在验证…';
+    try {
+      await api('/api/admin/buckets', { method: 'POST', data: { name: name.input.value, region: region.input.value,
+        keyId: keyId.input.value, applicationKey: key.input.value, quotaGiB: Number(quota.input.value), priority: Number(priority.input.value) } });
+      keyId.input.value = '';
+      key.input.value = '';
+      await refreshStorage('存储桶已接入');
+    } finally { $('dialog-submit').textContent = '验证并添加'; }
+  });
 }
 
 function dialog(title, content, submit, run, danger = false) {
@@ -371,7 +490,7 @@ async function uploadFile(file, parentId) {
 }
 
 async function uploadFiles(files) {
-  if (!files.length || state.uploading || state.view === 'shares') return;
+  if (!files.length || state.uploading || state.view !== 'files') return;
   state.uploading = true;
   $('upload').disabled = true;
   $('empty-upload').disabled = true;
@@ -399,8 +518,8 @@ async function uploadFiles(files) {
   } else { notify(`${files.length} 个文件上传完成`); $('upload-status').hidden = true; }
 }
 
-$('nav-files').addEventListener('click', openView);
-$('nav-shares').addEventListener('click', openView);
+document.querySelectorAll('#admin-navigation a, [data-admin-link]').forEach(node => node.addEventListener('click', openView));
+$('add-bucket').addEventListener('click', addBucketDialog);
 window.addEventListener('popstate', () => void load());
 $('more').addEventListener('click', () => void load(true));
 $('new-folder').addEventListener('click', newFolder);

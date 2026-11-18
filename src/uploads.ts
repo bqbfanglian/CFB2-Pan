@@ -1,6 +1,6 @@
 import { body, Entry, Env, exactBody, folder, HttpError, idOf, json, MaxBytes, nameOf, now, numberOf, PartBytes, Prefix, uniqueName, UploadLifetime } from './common';
-import { buckets, ObjectInfo, Part, store } from './storage';
-import { candidateArguments, chooseBucket, suspendBucket } from './scheduler';
+import { ObjectInfo, Part, store } from './storage';
+import { availableBucket, candidateArguments, chooseBucket, suspendBucket } from './scheduler';
 
 interface Upload {
   id: string;
@@ -77,34 +77,31 @@ function validParts(upload: Upload, parts: Part[]) {
     && part.bytes === partSize(upload, part.number)).sort((a, b) => a.number - b.number);
 }
 
-async function prepareTarget(env: Env, initial: Upload): Promise<{ upload: Upload; backend: ReturnType<typeof store> }> {
-  if (initial.write_started || initial.multipart_id) return { upload: initial, backend: store(env, initial.bucket_id) };
+async function prepareTarget(env: Env, initial: Upload): Promise<{ upload: Upload; backend: Awaited<ReturnType<typeof store>> }> {
+  if (initial.write_started || initial.multipart_id) return { upload: initial, backend: await store(env, initial.bucket_id) };
   const lock = initial.lock_token;
   const tried = new Set<string>();
   for (let upload: Upload | null = initial; upload;) {
     const { bucket_id: bucketId, object_key: key } = upload;
     tried.add(bucketId);
-    const writable = buckets(env).some(bucket => bucket.id === bucketId && bucket.writable);
-    const cooling = writable && await env.DB.prepare('SELECT 1 FROM bucket_health WHERE bucket_id = ? AND retry_at > ?')
-      .bind(bucketId, now()).first();
-    if (writable && !cooling) {
-      const backend = store(env, bucketId);
+    if (await availableBucket(env, bucketId)) {
       let multipartId: string | null = null;
-      let available = false;
+      let backend: Awaited<ReturnType<typeof store>> | null = null;
       try {
-        if (upload.multipart) multipartId = await backend.start(key);
-        else await backend.probe();
-        available = true;
+        const target = await store(env, bucketId);
+        if (upload.multipart) multipartId = await target.start(key);
+        else await target.probe();
+        backend = target;
       } catch (error) {
-        if (!(error instanceof HttpError) || error.status !== 502) throw error;
+        if (!(error instanceof HttpError) || ![502, 503].includes(error.status)) throw error;
         await suspendBucket(env.DB, bucketId);
       }
-      if (available) {
-        const saved = await env.DB.prepare('UPDATE uploads SET write_started = 1, multipart_id = ? WHERE id = ? AND lock_token = ? RETURNING *')
+      if (backend) {
+        const saved = await env.DB.prepare(`UPDATE uploads SET write_started = 1, multipart_id = ? WHERE id = ? AND lock_token = ?
+          AND NOT EXISTS (SELECT 1 FROM bucket_settings WHERE bucket_id = uploads.bucket_id AND (paused = 1 OR removed = 1)) RETURNING *`)
           .bind(multipartId, upload.id, lock).first<Upload>();
         if (saved) return { upload: saved, backend };
         if (multipartId) await backend.abort(key, multipartId).catch(() => undefined);
-        throw new HttpError(409, '上传会话状态已变化，请重试');
       }
     }
     upload = await env.DB.prepare(`${chooseBucket} UPDATE uploads SET bucket_id = (SELECT id FROM target)
@@ -137,7 +134,7 @@ export async function uploadRoute(env: Env, request: Request, id: string, action
     const current = await findUpload(env.DB, id);
     if (current?.state === 'done') return json({ id, done: true });
     const upload = requireOpen(current);
-    const backend = upload.write_started ? store(env, upload.bucket_id) : null;
+    const backend = upload.write_started ? await store(env, upload.bucket_id) : null;
     const completed = backend && await backend.head(upload.object_key);
     const parts = backend && !completed && upload.multipart_id ? validParts(upload, await backend.parts(upload.object_key, upload.multipart_id)) : [];
     return json({ id, multipart: !!upload.multipart, expiresAt: upload.expires_at, partBytes: PartBytes,
@@ -201,7 +198,7 @@ export async function cleanup(env: Env) {
   for (const upload of uploads.results) {
     try {
       if (upload.write_started) {
-        const backend = store(env, upload.bucket_id);
+        const backend = await store(env, upload.bucket_id);
         if (upload.multipart_id) await backend.abort(upload.object_key, upload.multipart_id);
         const object = await backend.head(upload.object_key);
         if (object) await backend.remove(upload.object_key, object.version);
@@ -214,7 +211,7 @@ export async function cleanup(env: Env) {
   }
   for (const entry of entries.results) {
     try {
-      await store(env, entry.bucket_id!).remove(entry.object_key!, entry.version_id!);
+      await (await store(env, entry.bucket_id!)).remove(entry.object_key!, entry.version_id!);
       await db.prepare('DELETE FROM entries WHERE id = ? AND deleted_at IS NOT NULL').bind(entry.id).run();
     } catch {
       await db.prepare('UPDATE entries SET cleanup_after = ? WHERE id = ?').bind(timestamp + 3600, entry.id).run();

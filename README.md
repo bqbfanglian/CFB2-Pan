@@ -1,10 +1,10 @@
 # CFB2 网盘
 
-用 Cloudflare Workers 分发文件。访客打开分享链接即可下载，分享可设密码和有效期，也可手动撤销。管理员用网盘密码登录后上传和管理文件。Worker 会在多个 Backblaze B2 私有桶之间自动调度。
+CFB2 是基于 Cloudflare Workers 的个人资源分发工具。收到链接的访客直接访问分享页。管理员在 `/admin` 上传资源、管理分享和接入 Backblaze B2 私有桶，Worker 自动分配新上传。
 
 ## 网页部署教程
 
-全程用浏览器操作。准备 Cloudflare、GitHub 和 Backblaze B2 账号。首次部署可以直接使用 Cloudflare 提供的 `workers.dev` 地址。打开根路径进入管理登录，把 `/s/…` 分享链接发给访客即可。 [Cloudflare 的 `workers.dev` 地址](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+全程用浏览器操作。准备 Cloudflare、GitHub 和 Backblaze B2 账号。一个 `workers.dev` 地址即可使用。在该地址后加 `/admin` 管理资源，发布后的 `/s/…` 链接供访客下载。 [Cloudflare 的 `workers.dev` 地址](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 
 下面从**新建数据库**开始。升级已有网盘请看文末的[升级说明](#升级已有网盘)。
 
@@ -19,8 +19,9 @@
    | 2 | [0002_cleanup_retry.sql](migrations/0002_cleanup_retry.sql) |
    | 3 | [0003_bucket_scheduling.sql](migrations/0003_bucket_scheduling.sql) |
    | 4 | [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql) |
+   | 5 | [0005_bucket_management.sql](migrations/0005_bucket_management.sql) |
 
-3. 执行下方查询，看到 `root` 和 `我的文件` 就说明网盘根目录已创建。在 **Tables** 页确认有 `bucket_health` 和 `admin_sessions` 表。
+3. 执行下方查询，看到 `root` 和 `我的文件` 就说明网盘根目录已创建。在 **Tables** 页确认有 `admin_sessions` 和 `bucket_settings` 表。
 
    ```sql
    SELECT id, name FROM entries WHERE id = 'root';
@@ -28,9 +29,9 @@
 
 4. 在 GitHub 打开你要部署的仓库。自己已有写权限就直接用，否则先点页面右上角的 **Fork**。在你的仓库 `main` 分支打开根目录的 `wrangler.jsonc`，点铅笔图标。把 `database_id` 的全零值替换为第一步复制的 ID，保留 `binding` 为 `DB` 和 `database_name` 为 `cfb2-pan`，然后点 **Commit changes** 保存到 `main`。
 
-### 2. 在 Backblaze 建两个私有桶
+### 2. 在 Backblaze 准备私有桶和密钥
 
-1. 打开 Backblaze 控制台，进入 **B2 Cloud Storage → Buckets → Create a Bucket**。选 **Private**，创建两个桶。记下每个桶的名称和页面显示的 **S3 Endpoint**。例如端点 `s3.us-west-004.backblazeb2.com` 对应的 `region` 是 `us-west-004`。沿用桶的默认跨域配置即可。 [Backblaze 建桶](https://www.backblaze.com/docs/cloud-storage-create-and-manage-buckets)
+1. 打开 Backblaze 控制台，进入 **B2 Cloud Storage → Buckets → Create a Bucket**。选 **Private** 创建桶。记下桶名和 **S3 Endpoint**，例如 `s3.us-west-004.backblazeb2.com` 对应区域 `us-west-004`。可以先接入一个桶，之后再扩充。保留默认跨域配置。 [Backblaze 建桶](https://www.backblaze.com/docs/cloud-storage-create-and-manage-buckets)
 2. 打开 **Application Keys → Add a New Application Key**，每个桶分别建一把密钥。
 
    | 表单字段 | 填写内容 |
@@ -42,16 +43,7 @@
 
    点 **Create New Key** 后，保存显示的 `keyID` 和 `applicationKey`。密钥值只在创建时显示。 [Backblaze 应用密钥](https://www.backblaze.com/docs/en/cloud-storage-get-started-with-a-backblaze-integration#scoped-application-key-recommended)
 
-3. 打开 [B2 配置示例](config/b2-buckets.example.json)，复制整个 JSON 到本机文本编辑器。两段分别填各自的桶，保留外层 `[` 和 `]`。这段填好的 JSON 稍后完整粘贴到 Cloudflare 的 `B2_BUCKETS` Secret。
-
-   | JSON 字段 | 从哪里取值 |
-   | --- | --- |
-   | `name` | Backblaze 的桶名 |
-   | `region` | 该桶 S3 Endpoint 中的区域 |
-   | `keyId` | 对应桶的 `keyID` |
-   | `applicationKey` | 对应桶的 `applicationKey` |
-
-   示例给每个桶设了 10 GiB 应用配额。首装可直接保留示例中的 `id`、`quota`、`priority` 和 `writable`。真实密钥只填进本机临时副本和 Cloudflare Secret，GitHub 上保留原占位值。
+   桶名、区域和这两个密钥值在第 5 步填进管理台。
 
 ### 3. 在 Workers & Pages 导入 GitHub 仓库
 
@@ -69,23 +61,22 @@
 
 3. 打开这个 Worker 的 **Deployments**，确认已有成功部署。打开 **Bindings**，确认 `DB` 指向 `cfb2-pan`。在 **Settings → Domains & Routes** 复制 `workers.dev` 地址。如果账户尚未设置 `workers.dev` 子域名，按控制台提示先注册。 [Workers Builds 表单说明](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) · [`workers.dev` 设置](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 
-### 4. 在 Worker 添加三个 Secret
+### 4. 在 Worker 添加两个 Secret
 
 进入 **Workers & Pages → cfb2-pan → Settings → Variables and Secrets → Add**。按表逐项填 **Type**、**Variable name** 和 **Value**，保存并部署设置。
 
 | Variable name | Type | Value |
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | Secret | 自设的管理员密码，16 至 128 个字符，建议用密码管理器生成 |
-| `B2_BUCKETS` | Secret | 第 2 步填好的整个 JSON 数组 |
 | `SHARE_SECRET` | Secret | 用密码管理器独立生成的随机字符串，至少 32 字节，例如 40 位随机字母和数字 |
 
-登录时输入 `ADMIN_PASSWORD`。后续部署继续使用原 `SHARE_SECRET`，这样管理页可以再次复制已有分享链接。 [Worker Secret 设置](https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboard)
+登录时输入 `ADMIN_PASSWORD`。请备份并保留 `SHARE_SECRET`，它也用于解密后台保存的桶密钥和复制已有分享链接。 [Worker Secret 设置](https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboard)
 
-### 5. 验收上传和分享
+### 5. 在管理台接入桶并发布资源
 
-1. 打开第 3 步复制的站点地址，输入 `ADMIN_PASSWORD` 登录。进入网盘后，应能看到文件列表和总容量。
-2. 上传一个小文件，再上传一个大于 16 MiB 的文件，分别下载验证。要检查自动选桶，可在两个等额空桶上先连续上传两个同样大小的文件，再到 Backblaze 的 **Browse Files → cfb2-pan/** 确认每桶各新增一个对象。
-3. 为文件创建分享，密码留空。在无痕窗口打开链接，应能直接看到文件并下载。再从管理页撤销链接，用同一链接重新下载应被拒绝。需要给资源加一道密码时，可在创建分享时填写访问密码。
+1. 打开站点的 `/admin`，用 `ADMIN_PASSWORD` 登录。进入 **存储 → 添加存储桶**。
+2. 填第 2 步拿到的桶名、S3 区域、Key ID 和 Application Key。应用配额以 GiB 填写，例如 `10`。优先级只在占用率相同时生效，数值较小者优先。点 **验证并添加**，成功后应出现桶卡片和容量。Worker 会检查读写连通性，并加密保存桶密钥。
+3. 进入 **资源 → 上传文件**。上传后点文件右侧的**创建分享**按钮。密码留空的分享可在无痕窗口直接下载。回到 **分享** 撤销链接后，访客的新下载请求会被拒绝。
 
 ### 可选：使用自定义域名
 
@@ -99,17 +90,18 @@
 | 构建日志提示 D1 绑定错误，或网盘打不开文件列表 | 检查部署分支的 `wrangler.jsonc` 是否使用了实际 `database_id`，再到该 D1 的 **Tables** 确认迁移已执行。 |
 | 登录时提示管理员密码未配置 | 在 **Variables and Secrets** 添加或更新 `ADMIN_PASSWORD`，保存并部署设置。 |
 | 绑定的自定义域名打不开 | 在 **Domains & Routes** 确认域名已绑到正确的 Worker。如果设置过 `ADMIN_HOST` 或 `SHARE_HOST`，核对拼写。 |
-| 网盘显示 B2 配置错误，或写入失败 | 检查 `B2_BUCKETS` 是否为完整 JSON，桶名、区域和密钥是否一一对应，密钥是否有 **Read and Write** 权限。 |
+| 添加桶提示验证失败 | 确认桶名、区域和密钥对应，密钥有 **Read and Write** 权限，且允许 `cfb2-pan/` 前缀。 |
+| 「移除桶」不可用 | 桶仍有文件、未完成上传或待清理记录。处理后等待定时清理，再刷新后台。 |
 
 ## 升级已有网盘
 
-1. 在旧 Worker 上先设置 `ADMIN_PASSWORD`。继续使用原 D1、桶 `id`、`SHARE_SECRET` 和分享域名。
-2. 如果之前通过 D1 控制台初始化，在 **D1 → Console** 执行新增的 [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql)。使用 Wrangler 自动迁移的实例沿用原部署命令即可。 [D1 迁移记录](https://developers.cloudflare.com/d1/reference/migrations/)
-3. 新版部署成功后，在 Zero Trust 中取消该网盘域名的旧 Access 应用，再用管理员密码登录确认。保留原分享域名即可继续使用先前发出的分享链接。
+1. 继续使用原 D1、`SHARE_SECRET` 和分享域名。原 `B2_BUCKETS` 配置会自动出现在管理台，桶 `id` 继续用于定位旧文件。
+2. 若之前通过 D1 控制台初始化，部署前按顺序执行尚未应用的迁移。本版新增 [0005_bucket_management.sql](migrations/0005_bucket_management.sql)。若仍在 Access 登录版本，先设置 `ADMIN_PASSWORD` 并执行 [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql)。使用 Wrangler 自动迁移的实例沿用原部署命令。 [D1 迁移记录](https://developers.cloudflare.com/d1/reference/migrations/)
+3. 部署后打开 `/admin`。仍在使用旧 Access 应用的实例可在 Zero Trust 中取消该网盘域名的 Access 应用，再用管理员密码登录确认。
 
 ## 日常使用
 
-- 调整桶配额或增加桶时，在 Worker 控制台编辑 `B2_BUCKETS` Secret。设置 `writable: false` 可暂停向该桶分配新文件。有历史文件或清理任务时，保留该桶的配置和有效密钥。
+- **存储**页可暂停或恢复新上传分配。正在上传的文件可续传，旧文件和分享照常下载。没有文件或上传引用的桶可从网盘移除，Backblaze 上的桶会保留。
 - Worker 按上传后的占用率选桶，占用率相同再看 `priority`。写入前探测失败会换桶，已开始写入的会话固定在原桶。单文件上限 1 GiB，上传中断后，在同一浏览器和目录重新选原文件即可续传。
 - 删除后会立即停止新下载，定时任务删除 B2 对象版本后释放配额。请分别备份 D1 元数据与要保留的 B2 文件。 [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 
@@ -120,4 +112,4 @@ npm ci
 npm run dev
 ```
 
-打开 [本地网盘](http://127.0.0.1:8787/)，使用演示密码 `cfb2-demo-password` 登录。本地演示使用 Wrangler 模拟的 D1 和两个对象桶，数据位于 `.wrangler/state`。运行 `npm run check` 检查代码，运行 `npm run build` 验证部署构建。Windows PowerShell 可使用 `npm.cmd`。
+打开 [本地管理台](http://127.0.0.1:8787/admin)，使用演示密码 `cfb2-demo-password` 登录。本地演示使用 Wrangler 模拟的 D1 和对象桶，数据位于 `.wrangler/state`。运行 `npm run check` 检查代码，运行 `npm run build` 验证部署构建。Windows PowerShell 可使用 `npm.cmd`。
