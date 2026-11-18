@@ -7,7 +7,14 @@
     "dev": "wrangler d1 migrations apply DB --local --config config/wrangler.demo.jsonc --persist-to .wrangler/state && wrangler dev --local --config config/wrangler.demo.jsonc --persist-to .wrangler/state",
     "check": "tsc --noEmit && node --check public/drive.js && node --check public/login.js && node --check public/share.js",
     "build": "wrangler deploy --dry-run --outdir dist",
+    "predeploy": "wrangler d1 migrations apply DB --remote",
     "deploy": "wrangler deploy"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_PASSWORD": { "description": "管理员登录密码，16 至 128 个字符。" },
+      "SHARE_SECRET": { "description": "独立生成并备份的随机字符串，例如 40 位随机字母和数字。用于加密存储桶密钥和生成分享链接。" }
+    }
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",
