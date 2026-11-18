@@ -6,28 +6,11 @@ CFB2 是基于 Cloudflare Workers 的个人资源分发工具。收到链接的�
 
 全程用浏览器操作。准备 Cloudflare、GitHub 和 Backblaze B2 账号。一个 `workers.dev` 地址即可使用。在该地址后加 `/admin` 管理资源，发布后的 `/s/…` 链接供访客下载。 [Cloudflare 的 `workers.dev` 地址](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
 
-下面从**新建数据库**开始。升级已有网盘请看文末的[升级说明](#升级已有网盘)。
-
 ### 1. 在 Cloudflare 建库，在 GitHub 填数据库 ID
 
 1. 打开 Cloudflare 控制台，进入 **D1 SQL Database → Create database**。名称填 `cfb2-pan`，创建后在数据库页面复制 **Database ID**。 [Cloudflare D1 控制台](https://dash.cloudflare.com/?to=/:account/workers/d1)
-2. 在同一个数据库页面打开 **Console**。按下表顺序执行 SQL。每一行都先在 GitHub 打开文件，用 **Raw** 查看并复制整个文件，再回到 D1 的输入框粘贴并点 **Execute**。确认本次执行成功后再粘贴下一份。 [D1 控制台执行 SQL](https://developers.cloudflare.com/d1/get-started/#populate-your-d1-database)
-
-   | 顺序 | 复制这个文件 |
-   | --- | --- |
-   | 1 | [0001_drive.sql](migrations/0001_drive.sql) |
-   | 2 | [0002_cleanup_retry.sql](migrations/0002_cleanup_retry.sql) |
-   | 3 | [0003_bucket_scheduling.sql](migrations/0003_bucket_scheduling.sql) |
-   | 4 | [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql) |
-   | 5 | [0005_bucket_management.sql](migrations/0005_bucket_management.sql) |
-
-3. 执行下方查询，看到 `root` 和 `我的文件` 就说明网盘根目录已创建。在 **Tables** 页确认有 `admin_sessions` 和 `bucket_settings` 表。
-
-   ```sql
-   SELECT id, name FROM entries WHERE id = 'root';
-   ```
-
-4. 在 GitHub 打开你要部署的仓库。自己已有写权限就直接用，否则先点页面右上角的 **Fork**。在你的仓库 `main` 分支打开根目录的 `wrangler.jsonc`，点铅笔图标。把 `database_id` 的全零值替换为第一步复制的 ID，保留 `binding` 为 `DB` 和 `database_name` 为 `cfb2-pan`，然后点 **Commit changes** 保存到 `main`。
+2. 打开 [初始化 SQL](migrations/0001_initial.sql)，点 **Raw** 并复制全文。回到 D1 数据库的 **Console**，一次粘贴并点 **Execute**。执行成功后，在 **Tables** 中能看到 `entries`、`admin_sessions` 和 `bucket_settings`。 [D1 控制台执行 SQL](https://developers.cloudflare.com/d1/get-started/#populate-your-d1-database)
+3. 在 GitHub 打开你要部署的仓库。自己已有写权限就直接用，否则先点页面右上角的 **Fork**。在你的仓库 `main` 分支打开根目录的 `wrangler.jsonc`，点铅笔图标。把 `database_id` 的全零值替换为刚复制的数据库 ID，保留 `binding` 为 `DB` 和 `database_name` 为 `cfb2-pan`，然后点 **Commit changes** 保存到 `main`。
 
 ### 2. 在 Backblaze 准备私有桶和密钥
 
@@ -92,12 +75,6 @@ CFB2 是基于 Cloudflare Workers 的个人资源分发工具。收到链接的�
 | 绑定的自定义域名打不开 | 在 **Domains & Routes** 确认域名已绑到正确的 Worker。如果设置过 `ADMIN_HOST` 或 `SHARE_HOST`，核对拼写。 |
 | 添加桶提示验证失败 | 确认桶名、区域和密钥对应，密钥有 **Read and Write** 权限，且允许 `cfb2-pan/` 前缀。 |
 | 「移除桶」不可用 | 桶仍有文件、未完成上传或待清理记录。处理后等待定时清理，再刷新后台。 |
-
-## 升级已有网盘
-
-1. 继续使用原 D1、`SHARE_SECRET` 和分享域名。原 `B2_BUCKETS` 配置会自动出现在管理台，桶 `id` 继续用于定位旧文件。
-2. 若之前通过 D1 控制台初始化，部署前按顺序执行尚未应用的迁移。本版新增 [0005_bucket_management.sql](migrations/0005_bucket_management.sql)。若仍在 Access 登录版本，先设置 `ADMIN_PASSWORD` 并执行 [0004_admin_sessions.sql](migrations/0004_admin_sessions.sql)。使用 Wrangler 自动迁移的实例沿用原部署命令。 [D1 迁移记录](https://developers.cloudflare.com/d1/reference/migrations/)
-3. 部署后打开 `/admin`。仍在使用旧 Access 应用的实例可在 Zero Trust 中取消该网盘域名的 Access 应用，再用管理员密码登录确认。
 
 ## 日常使用
 
